@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --set=ON_ERROR_STOP=1 <<'SQL'
+\getenv migrator_password GOSTACK_MIGRATOR_PASSWORD
+\getenv runtime_password GOSTACK_RUNTIME_PASSWORD
+CREATE ROLE gostack_migrator LOGIN PASSWORD :'migrator_password'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+CREATE ROLE gostack_runtime LOGIN PASSWORD :'runtime_password'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+REVOKE ALL ON DATABASE gostack FROM PUBLIC;
+GRANT CONNECT ON DATABASE gostack TO gostack_migrator, gostack_runtime;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+GRANT USAGE, CREATE ON SCHEMA public TO gostack_migrator;
+GRANT USAGE ON SCHEMA public TO gostack_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE gostack_migrator IN SCHEMA public
+    GRANT SELECT ON TABLES TO gostack_runtime;
+SQL

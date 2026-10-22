@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:18.6-alpine3.24@sha256:83148c0bc09eac4d598b70a61e1404d0212b76c95c504bfd6c81a4c59ec91792
+    environment:
+      POSTGRES_DB: gostack
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a random hex secret}
+      GOSTACK_MIGRATOR_PASSWORD: ${GOSTACK_MIGRATOR_PASSWORD:?Set GOSTACK_MIGRATOR_PASSWORD}
+      GOSTACK_RUNTIME_PASSWORD: ${GOSTACK_RUNTIME_PASSWORD:?Set GOSTACK_RUNTIME_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./deploy/postgres/init.sh:/docker-entrypoint-initdb.d/10-gostack.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gostack"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    image: gostack-phase1:local
+    command: ["migrate", "up"]
+    environment:
+      GOSTACK_ENV: development
+      GOSTACK_DATABASE_URL: postgres://gostack_runtime:${GOSTACK_RUNTIME_PASSWORD}@postgres:5432/gostack?sslmode=disable
+      GOSTACK_MIGRATION_DATABASE_URL: postgres://gostack_migrator:${GOSTACK_MIGRATOR_PASSWORD}@postgres:5432/gostack?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: runtime
+    image: gostack-phase1:local
+    environment:
+      GOSTACK_ENV: development
+      GOSTACK_DATABASE_URL: postgres://gostack_runtime:${GOSTACK_RUNTIME_PASSWORD}@postgres:5432/gostack?sslmode=disable
+    ports:
+      - "127.0.0.1:${GOSTACK_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 35s
+    restart: unless-stopped
+
+  tests:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    environment:
+      GOSTACK_REQUIRE_INTEGRATION: "true"
+      GOSTACK_TEST_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/gostack?sslmode=disable
+      GOSTACK_TEST_RUNTIME_DATABASE_URL: postgres://gostack_runtime:${GOSTACK_RUNTIME_PASSWORD}@postgres:5432/gostack?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

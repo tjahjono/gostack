@@ -1,0 +1,62 @@
+name: GoStack
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  go:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build ./...
+      - if: runner.os == 'Linux'
+        run: go test -race ./...
+
+  postgres:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.24@sha256:83148c0bc09eac4d598b70a61e1404d0212b76c95c504bfd6c81a4c59ec91792
+        env:
+          POSTGRES_DB: gostack
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gostack"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      GOSTACK_REQUIRE_INTEGRATION: "true"
+      GOSTACK_ENV: test
+      GOSTACK_DATABASE_URL: postgres://gostack_runtime@127.0.0.1:5432/gostack?sslmode=disable
+      GOSTACK_MIGRATION_DATABASE_URL: postgres://gostack_migrator@127.0.0.1:5432/gostack?sslmode=disable
+      GOSTACK_TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/gostack?sslmode=disable
+      GOSTACK_TEST_RUNTIME_DATABASE_URL: postgres://gostack_runtime@127.0.0.1:5432/gostack?sslmode=disable
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Provision isolated CI roles
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: gostack
+          PGHOST: 127.0.0.1
+          GOSTACK_MIGRATOR_PASSWORD: unused-isolated-ci
+          GOSTACK_RUNTIME_PASSWORD: unused-isolated-ci
+        run: sh deploy/postgres/init.sh
+      - run: go run ./examples/minimal migrate up
+      - run: go test -race -count=1 ./...
