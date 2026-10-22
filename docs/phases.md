@@ -51,3 +51,15 @@ Remaining: all Phase 2-14 implementation files, including core module registry/m
 Known limitations: only health routes exist; the full security/business stack is not implemented. Migrations currently require transactional SQL. The convenience PostgreSQL provisioning script targets the documented gostack database and role names.
 
 Next: Phase 2 core contracts, module registry, explicit wiring, middleware foundation, and architecture checks. Wait for continue.
+
+## Phase 2 report
+
+Completed: typed core/repository/service/transaction contracts, security provider ports, leaf module API, immutable framework-first registry, lifecycle integration, declarative route policies, HTTP middleware, architecture checks, external consumer compile/routing probe, and PostgreSQL transaction tests. See [Phase 2](phase-2.md) for public composition and policy details.
+
+Verification covers normal/race Go suites with real PostgreSQL integration, vet, build, module checksums, dependency ordering and rollback, fail-closed policies, proxy spoofing, request deadlines, and external-module reuse. Docker execution testing remains skipped at the user's request.
+
+Remaining: Phase 3-14 implementation, starting with user/auth/session modules. The health module remains the only built-in runtime module; declared security-provider ports do not advertise unimplemented identity features.
+
+Known limitations: lifecycle/provider callbacks must honor contexts; transaction callbacks cannot retain bound repositories or perform external effects; business identity implementations and protocol-specific policies arrive in their assigned phases.
+
+Next: Phase 3 user management, local authentication, sessions, lockout, and durable audit append. Wait for continue.

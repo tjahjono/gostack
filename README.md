@@ -4,7 +4,7 @@ GoStack is a reusable Go framework for enterprise HTTP services, built around ex
 
 ## Status
 
-Phase 1 is implemented: validated configuration, structured logging, PostgreSQL pooling, checksummed migrations, health checks, bounded startup/shutdown, Docker assets, and CI. Identity modules and the `gostack` generator CLI are delivered in later phases. The executable under `examples/minimal` demonstrates framework composition; it is not the framework's product CLI.
+Phases 1 and 2 are implemented: configuration, logging, PostgreSQL, migrations, runtime lifecycle, typed contracts, immutable module registration, transaction boundaries, HTTP security middleware, and architecture checks. Identity modules and the `gostack` generator CLI are delivered in later phases. The executable under `examples/minimal` demonstrates framework composition; it is not the framework's product CLI.
 
 ## Requirements
 
@@ -60,6 +60,7 @@ For PostgreSQL integration tests, supply `GOSTACK_TEST_DATABASE_URL` for an isol
 - [CLI and generator](docs/generator.md)
 - [Delivery phases](docs/phases.md)
 - [Phase 1 operations and verification](docs/phase-1.md)
+- [Phase 2 module composition and HTTP policies](docs/phase-2.md)
 
 User, role, permission, auth, session, password, MFA, LDAP, SAML, identity, and audit are built-in framework modules planned for the following phases. Generators will never recreate them.
 

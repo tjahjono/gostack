@@ -1,0 +1,132 @@
+package consumer
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/tjahjono/gostack/config"
+	"github.com/tjahjono/gostack/core/contract"
+	"github.com/tjahjono/gostack/framework"
+	"github.com/tjahjono/gostack/httpkit"
+	"github.com/tjahjono/gostack/httpkit/router"
+	"github.com/tjahjono/gostack/logging"
+	"github.com/tjahjono/gostack/moduleapi"
+	"github.com/tjahjono/gostack/security"
+)
+
+type Entity struct{ ID string }
+type ProductRepository interface {
+	contract.Repository[string, Entity, Entity, Entity, string]
+}
+type ProductService interface {
+	contract.Service[string, Entity, Entity, Entity, string]
+}
+
+type Repository interface {
+	Message(context.Context) (string, error)
+}
+type MemoryRepository struct{ message string }
+
+func NewRepository(message string) *MemoryRepository { return &MemoryRepository{message: message} }
+func (r *MemoryRepository) Message(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return r.message, nil
+}
+
+type ServiceContract interface {
+	Message(context.Context) (string, error)
+}
+type Service struct{ repository Repository }
+
+func NewService(repository Repository) *Service                { return &Service{repository: repository} }
+func (s *Service) Message(ctx context.Context) (string, error) { return s.repository.Message(ctx) }
+
+type Delivery struct{ service ServiceContract }
+
+func NewDelivery(service ServiceContract) *Delivery { return &Delivery{service: service} }
+func (d *Delivery) RegisterRoutes(registrar router.Registrar) error {
+	return registrar.Register(router.Route{Method: "GET", Path: "/api/v1/status", Policy: router.Policy{Access: router.Public}, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		message, err := d.service.Message(r.Context())
+		if err != nil {
+			httpkit.WriteError(w, r, err)
+			return
+		}
+		_, _ = io.WriteString(w, message)
+	})})
+}
+
+type Database struct{}
+
+func NewDatabase() *Database                      { return &Database{} }
+func (*Database) Ping(ctx context.Context) error  { return ctx.Err() }
+func (*Database) Close(ctx context.Context) error { return ctx.Err() }
+
+type Readiness struct{}
+
+func NewReadiness() *Readiness                     { return &Readiness{} }
+func (*Readiness) Check(ctx context.Context) error { return ctx.Err() }
+
+func TestPublicContractsAndConstructorInjection(t *testing.T) {
+	descriptor, err := moduleapi.NewDescriptor("status", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	component, err := moduleapi.New(descriptor, NewDelivery(NewService(NewRepository("ready"))), moduleapi.NewPassiveLifecycle())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := framework.NewRegistry(nil, []moduleapi.Module{component}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard, err := httpkit.NewPolicyGuard(security.Providers{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, err := router.NewMux(registry.Routes(), guard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger, err := logging.NewJSONLogger(io.Discard, "info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stack, err := httpkit.NewStack(httpkit.Options{}, logger, security.NewSecureRandom())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	stack.Wrap(mux).ServeHTTP(response, httptest.NewRequest("GET", "http://app.test/api/v1/status", nil))
+	if response.Code != 200 || response.Body.String() != "ready" {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	provider, _ := config.NewEnvProvider(func(key string) (string, bool) {
+		switch key {
+		case "GOSTACK_ENV":
+			return "test", true
+		case "GOSTACK_DATABASE_URL":
+			return "postgres://runtime@localhost/test?sslmode=disable", true
+		}
+		return "", false
+	})
+	settings, err := provider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := framework.NewWithDependencies(settings.HTTP, logger, NewDatabase(), NewReadiness(), framework.Options{Modules: []moduleapi.Module{component}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = app.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var repository ProductRepository
+	var service ProductService
+	_, _ = repository, service
+}

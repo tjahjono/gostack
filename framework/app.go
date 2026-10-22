@@ -10,12 +10,17 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/tjahjono/gostack/config"
 	"github.com/tjahjono/gostack/database"
+	"github.com/tjahjono/gostack/httpkit"
+	"github.com/tjahjono/gostack/httpkit/router"
 	"github.com/tjahjono/gostack/internal/bootstrap"
 	"github.com/tjahjono/gostack/logging"
 	"github.com/tjahjono/gostack/migration"
+	"github.com/tjahjono/gostack/moduleapi"
+	"github.com/tjahjono/gostack/security"
 )
 
 type Application interface {
@@ -23,18 +28,20 @@ type Application interface {
 	Close(context.Context) error
 }
 type App struct {
-	server   *http.Server
-	logger   logging.Logger
-	database database.Client
-	settings config.HTTP
-	ready    atomic.Bool
-	mu       sync.Mutex
-	started  bool
-	closed   bool
+	server         *http.Server
+	logger         logging.Logger
+	database       database.Client
+	settings       config.HTTP
+	ready          atomic.Bool
+	mu             sync.Mutex
+	started        bool
+	closed         bool
+	registry       *Registry
+	startupTimeout time.Duration
 }
 
 // New validates infrastructure and schema before creating a server.
-func New(ctx context.Context, settings config.Config, logger logging.Logger, source migration.Source) (*App, error) {
+func New(ctx context.Context, settings config.Config, logger logging.Logger, source migration.Source, options ...Options) (*App, error) {
 	if logger == nil {
 		return nil, errors.New("logger is required")
 	}
@@ -46,7 +53,7 @@ func New(ctx context.Context, settings config.Config, logger logging.Logger, sou
 	if err != nil {
 		return nil, err
 	}
-	app, err := NewWithDependencies(settings.HTTP, logger, resources.Database, resources.Readiness)
+	app, err := NewWithDependencies(settings.HTTP, logger, resources.Database, resources.Readiness, options...)
 	if err != nil {
 		cleanup, cancel := context.WithTimeout(context.Background(), settings.HTTP.ShutdownTimeout)
 		defer cancel()
@@ -57,25 +64,63 @@ func New(ctx context.Context, settings config.Config, logger logging.Logger, sou
 }
 
 // NewWithDependencies allows explicit infrastructure substitution for testing.
-func NewWithDependencies(settings config.HTTP, logger logging.Logger, db database.Client, checker Readiness) (*App, error) {
+func NewWithDependencies(settings config.HTTP, logger logging.Logger, db database.Client, checker Readiness, options ...Options) (*App, error) {
 	if logger == nil || db == nil {
 		return nil, errors.New("logger and database lifecycle are required")
 	}
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
+	if len(options) > 1 {
+		return nil, errors.New("at most one application options value is accepted")
+	}
+	var selected Options
+	if len(options) == 1 {
+		selected = options[0]
+	}
+	if selected.StartupTimeout == 0 {
+		selected.StartupTimeout = 15 * time.Second
+	}
+	if selected.StartupTimeout < time.Millisecond || selected.StartupTimeout > time.Minute {
+		return nil, errors.New("module startup timeout must be between 1ms and 1m")
+	}
 	a := &App{logger: logger, database: db, settings: settings}
 	health, err := NewHealth(checker, settings.HealthTimeout, a.ready.Load)
 	if err != nil {
 		return nil, err
 	}
-	mux := http.NewServeMux()
-	health.RegisterRoutes(mux)
+	builtin, err := newHealthModule(health)
+	if err != nil {
+		return nil, err
+	}
+	a.registry, err = NewRegistry([]moduleapi.Module{builtin}, selected.Modules, settings.ShutdownTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if selected.HTTP.RequestTimeout == 0 {
+		selected.HTTP.RequestTimeout = settings.WriteTimeout * 3 / 4
+	}
+	if selected.HTTP.RequestTimeout >= settings.WriteTimeout {
+		return nil, errors.New("request timeout must be shorter than HTTP write timeout")
+	}
+	stack, err := httpkit.NewStack(selected.HTTP, logger, security.NewSecureRandom())
+	if err != nil {
+		return nil, err
+	}
+	guard, err := httpkit.NewPolicyGuard(selected.HTTP.Providers, stack.OriginList())
+	if err != nil {
+		return nil, err
+	}
+	mux, err := router.NewMux(a.registry.Routes(), guard)
+	if err != nil {
+		return nil, err
+	}
+	a.startupTimeout = selected.StartupTimeout
 	writer, err := logging.NewWriter(logger)
 	if err != nil {
 		return nil, err
 	}
-	a.server = &http.Server{Addr: settings.Address, Handler: mux, ReadTimeout: settings.ReadTimeout, ReadHeaderTimeout: settings.ReadHeaderTimeout, WriteTimeout: settings.WriteTimeout, IdleTimeout: settings.IdleTimeout, MaxHeaderBytes: settings.MaxHeaderBytes, ErrorLog: log.New(writer, "", 0)}
+	a.server = &http.Server{Addr: settings.Address, Handler: stack.Wrap(mux), ReadTimeout: settings.ReadTimeout, ReadHeaderTimeout: settings.ReadHeaderTimeout, WriteTimeout: settings.WriteTimeout, IdleTimeout: settings.IdleTimeout, MaxHeaderBytes: settings.MaxHeaderBytes, ErrorLog: log.New(writer, "", 0)}
 	return a, nil
 }
 
@@ -98,6 +143,13 @@ func (a *App) Run(ctx context.Context) (result error) {
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", a.settings.Address)
 	if err != nil {
 		return errors.New("HTTP listener failed")
+	}
+	startup, cancelStartup := context.WithTimeout(ctx, a.startupTimeout)
+	err = a.registry.Start(startup)
+	cancelStartup()
+	if err != nil {
+		_ = listener.Close()
+		return err
 	}
 	requestCtx, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelRequests()
@@ -138,7 +190,7 @@ func (a *App) Close(ctx context.Context) error {
 	if serverErr != nil {
 		_ = a.server.Close()
 	}
-	return errors.Join(serverErr, a.database.Close(ctx))
+	return errors.Join(serverErr, a.registry.Stop(ctx), a.database.Close(ctx))
 }
 
 var _ Application = (*App)(nil)
